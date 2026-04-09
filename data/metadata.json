@@ -1,0 +1,42 @@
+[
+  {
+    "id": "prod_001",
+    "name": "Classic White Linen Shirt",
+    "brand": "Zara",
+    "price": 39.99,
+    "url": "https://www.zara.com/example/white-linen-shirt",
+    "image_path": "shirt_white.jpg"
+  },
+  {
+    "id": "prod_002",
+    "name": "Floral Sundress",
+    "brand": "H&M",
+    "price": 29.99,
+    "url": "https://www.hm.com/example/floral-sundress",
+    "image_path": "dress_floral.jpg"
+  },
+  {
+    "id": "prod_003",
+    "name": "Slim Fit Dark Jeans",
+    "brand": "Levi's",
+    "price": 69.99,
+    "url": "https://www.levi.com/example/slim-jeans",
+    "image_path": "jeans_dark.jpg"
+  },
+  {
+    "id": "prod_004",
+    "name": "Oversized Hoodie",
+    "brand": "Nike",
+    "price": 59.99,
+    "url": "https://www.nike.com/example/hoodie",
+    "image_path": "hoodie_grey.jpg"
+  },
+  {
+    "id": "prod_005",
+    "name": "Leather Ankle Boots",
+    "brand": "Steve Madden",
+    "price": 119.99,
+    "url": "https://www.stevemadden.com/example/ankle-boots",
+    "image_path": "boots_leather.jpg"
+  }
+]
