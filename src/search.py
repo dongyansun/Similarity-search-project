@@ -1,17 +1,12 @@
 """
-search.py — Cosine similarity search engine with optional filtering and reranking.
+search.py — Fashion search engine backed by a remote Qdrant vector database.
 
 Pipeline:
-    1. Filter  — narrow the index to a subset matching hard constraints
-                 (gender, masterCategory, subCategory, articleType, baseColour, season)
-    2. Retrieve — cosine similarity over filtered embeddings → top-N candidates
-    3. Rerank   — (optional) blend CLIP score with a keyword match score
-                  final = CLIP_WEIGHT * clip_score + KEYWORD_WEIGHT * keyword_score
+    1. build_index() — embed catalog images with CLIP, upload vectors + metadata to Qdrant
+    2. search()      — encode query image → Qdrant nearest-neighbour search → rerank
+    3. search_by_text() — encode text query → same Qdrant search → rerank
 
-Because all embeddings are L2-normalised, cosine similarity == dot product.
-
-To swap in ChromaDB/FAISS: replace the NumPy matmul in _retrieve() with a
-collection.query() call; everything else (filtering, reranking) stays identical.
+Qdrant handles filtering and ANN retrieval; Python handles reranking.
 """
 
 import re
@@ -25,129 +20,62 @@ from src.config import (
     TOP_K,
 )
 from src.embeddings import build_catalog_embeddings, encode_query_image
-
-# Fields that the filter dict can target (case-insensitive exact match)
-FILTERABLE_FIELDS = {
-    "gender", "masterCategory", "subCategory", "articleType", "baseColour", "season",
-}
+from src.vector_store import (
+    ensure_collection,
+    get_client,
+    search_vectors,
+    upload_embeddings,
+)
 
 
 class FashionSearchEngine:
     """
-    In-memory similarity search engine with optional filtering and reranking.
+    Visual search engine backed by a remote Qdrant instance.
 
     Quick start:
         engine = FashionSearchEngine()
-        engine.build_index()
+        engine.build_index()                               # uploads to Qdrant once
 
-        # plain CLIP search
         results = engine.search("query.jpg")
-
-        # with metadata filters
         results = engine.search("query.jpg", filters={"gender": "Men"})
-
-        # with reranking against a text hint
         results = engine.search("query.jpg", rerank_query="navy blue check shirt")
-
-        # text-only search
         results = engine.search_by_text("floral summer dress", filters={"gender": "Women"})
     """
 
     def __init__(self):
-        self.embeddings: np.ndarray | None = None   # (N, D) float32, full index
-        self.catalog: list[dict] | None = None       # N product dicts
+        self.client = get_client()
 
     # ── Index management ─────────────────────────────────────────────────────
 
     def build_index(self, force_rebuild: bool = False) -> None:
-        """Load (or build) embeddings + catalog. Call once before searching."""
-        self.embeddings, self.catalog = build_catalog_embeddings(force_rebuild)
-
-    def _check_ready(self):
-        if self.embeddings is None or self.catalog is None:
-            raise RuntimeError("Index not built. Call engine.build_index() first.")
-
-    # ── Filtering ─────────────────────────────────────────────────────────────
-
-    def _apply_filters(self, filters: dict | None) -> tuple[np.ndarray, list[dict]]:
         """
-        Return a (embeddings_subset, catalog_subset) restricted to items that
-        satisfy ALL conditions in `filters`.
+        Embed all catalog images with CLIP and upload them to Qdrant.
 
-        filters example:
-            {"gender": "Men", "masterCategory": "Apparel", "baseColour": "Navy Blue"}
+        Args:
+            force_rebuild: if True, drops and recreates the Qdrant collection
+                           before uploading. Use after adding new products or
+                           switching the CLIP model.
 
-        Matching is case-insensitive. Unknown filter keys raise a ValueError so
-        typos are caught early rather than silently returning the full catalog.
+        On subsequent runs without force_rebuild, if the collection already
+        exists and has points, the upload step is skipped entirely.
         """
-        if not filters:
-            return self.embeddings, self.catalog
+        ensure_collection(self.client, recreate=force_rebuild)
 
-        # Validate keys upfront
-        bad_keys = set(filters) - FILTERABLE_FIELDS
-        if bad_keys:
-            raise ValueError(
-                f"Unknown filter field(s): {bad_keys}. "
-                f"Valid fields: {FILTERABLE_FIELDS}"
-            )
+        # Skip upload if collection already has data
+        count = self.client.count(collection_name=__import__('src.config', fromlist=['COLLECTION_NAME']).COLLECTION_NAME).count
+        if count > 0 and not force_rebuild:
+            print(f"[INFO] Qdrant collection already has {count} points — skipping upload.")
+            return
 
-        # Build a boolean mask over the catalog
-        mask = np.ones(len(self.catalog), dtype=bool)
-        for field, value in filters.items():
-            mask &= np.array(
-                [entry.get(field, "").lower() == value.lower()
-                 for entry in self.catalog],
-                dtype=bool,
-            )
+        embeddings, catalog = build_catalog_embeddings(force_rebuild=False)
+        upload_embeddings(self.client, embeddings, catalog)
 
-        indices = np.where(mask)[0]
-        if len(indices) == 0:
-            raise ValueError(f"No products match the filters: {filters}")
-
-        filtered_embeddings = self.embeddings[indices]
-        filtered_catalog = [self.catalog[i] for i in indices]
-        print(f"[INFO] Filter applied: {len(indices)}/{len(self.catalog)} items match.")
-        return filtered_embeddings, filtered_catalog
-
-    # ── Retrieval ─────────────────────────────────────────────────────────────
-
-    def _retrieve(
-        self,
-        query_vec: np.ndarray,
-        embeddings: np.ndarray,
-        catalog: list[dict],
-        top_n: int,
-    ) -> list[dict]:
-        """
-        Core retrieval: dot-product similarity → top-n candidates (unsorted list).
-        query_vec shape: (D,), embeddings shape: (N, D).
-        """
-        scores = embeddings @ query_vec                          # (N,)
-        k = min(top_n, len(scores))
-        top_idx = np.argpartition(scores, -k)[-k:]              # unordered top-k
-        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]    # sorted desc
-
-        results = []
-        for rank, idx in enumerate(top_idx, start=1):
-            entry = catalog[idx].copy()
-            entry["clip_score"] = float(scores[idx])
-            entry["score"] = float(scores[idx])     # may be updated by reranker
-            entry["rank"] = rank
-            results.append(entry)
-        return results
-
-    # ── Reranking ─────────────────────────────────────────────────────────────
+    # ── Reranking (pure Python — unchanged from local version) ───────────────
 
     @staticmethod
     def _keyword_score(entry: dict, query_words: list[str]) -> float:
-        """
-        Count how many query words appear in the product's searchable text fields.
-        Returns a normalised score ∈ [0, 1].
-        """
         if not query_words:
             return 0.0
-
-        # Concatenate all text fields that carry semantic meaning
         searchable = " ".join([
             entry.get("name", ""),
             entry.get("articleType", ""),
@@ -158,46 +86,30 @@ class FashionSearchEngine:
             entry.get("season", ""),
             entry.get("usage", ""),
         ]).lower()
-
         hits = sum(1 for w in query_words if w in searchable)
         return hits / len(query_words)
 
     def _rerank(self, candidates: list[dict], text_query: str) -> list[dict]:
         """
-        Re-score a candidate list by blending CLIP score with keyword match score.
-
-        final_score = CLIP_WEIGHT * clip_score + KEYWORD_WEIGHT * keyword_score
-
-        Both terms are normalised before blending so they are on the same scale:
-          - clip_score   : already ∈ [-1, 1], normalised to [0, 1] linearly
-          - keyword_score: already ∈ [0, 1]
+        Blend CLIP score with keyword match score.
+        final = CLIP_WEIGHT * norm(clip_score) + KEYWORD_WEIGHT * keyword_score
         """
         if not text_query or not candidates:
             return candidates
 
-        # Tokenise query: lowercase, strip punctuation, remove 1-char tokens
-        query_words = [
-            w for w in re.split(r"\W+", text_query.lower()) if len(w) > 1
-        ]
+        query_words = [w for w in re.split(r"\W+", text_query.lower()) if len(w) > 1]
 
-        # Normalise CLIP scores to [0, 1] over this candidate set
         clip_scores = np.array([c["clip_score"] for c in candidates])
         c_min, c_max = clip_scores.min(), clip_scores.max()
-        if c_max > c_min:
-            norm_clip = (clip_scores - c_min) / (c_max - c_min)
-        else:
-            norm_clip = np.ones(len(candidates))
+        norm_clip = (clip_scores - c_min) / (c_max - c_min) if c_max > c_min else np.ones(len(candidates))
 
         for i, entry in enumerate(candidates):
             kw = self._keyword_score(entry, query_words)
             entry["keyword_score"] = round(kw, 4)
             entry["score"] = round(
-                RERANK_CLIP_WEIGHT * float(norm_clip[i])
-                + RERANK_KEYWORD_WEIGHT * kw,
-                4,
+                RERANK_CLIP_WEIGHT * float(norm_clip[i]) + RERANK_KEYWORD_WEIGHT * kw, 4
             )
 
-        # Sort by blended score descending and reassign ranks
         candidates.sort(key=lambda x: x["score"], reverse=True)
         for i, entry in enumerate(candidates):
             entry["rank"] = i + 1
@@ -217,32 +129,16 @@ class FashionSearchEngine:
         Find the top-k most visually similar products to a query image.
 
         Args:
-            query        : PIL.Image or filepath string to the query image.
-            top_k        : number of final results to return.
-            filters      : dict of exact-match metadata constraints, e.g.
-                           {"gender": "Men", "baseColour": "Navy Blue"}
-            rerank_query : optional text string used to rerank CLIP results,
-                           e.g. "navy blue check shirt". Combines CLIP visual
-                           similarity with keyword overlap in product metadata.
-
-        Returns:
-            List of result dicts sorted by descending score, each containing:
-            rank, score, clip_score, keyword_score (if reranked), id, name,
-            brand, gender, masterCategory, subCategory, articleType,
-            baseColour, season, year, usage, image_path.
+            query        : PIL.Image or filepath string.
+            top_k        : number of final results.
+            filters      : e.g. {"gender": "Men", "baseColour": "Navy Blue"}
+            rerank_query : optional text to blend with CLIP score for reranking.
         """
-        self._check_ready()
-
         query_vec = encode_query_image(query).astype(np.float32)
 
-        # 1. Filter
-        emb, cat = self._apply_filters(filters)
-
-        # 2. Retrieve — pull a larger candidate pool when reranking
         n_candidates = RERANK_CANDIDATE_POOL if rerank_query else top_k
-        candidates = self._retrieve(query_vec, emb, cat, top_n=n_candidates)
+        candidates = search_vectors(self.client, query_vec, n_candidates, filters)
 
-        # 3. Rerank (optional)
         if rerank_query:
             candidates = self._rerank(candidates, rerank_query)
 
@@ -260,16 +156,12 @@ class FashionSearchEngine:
 
         Args:
             text_query : e.g. "red floral summer dress"
-            top_k      : number of final results to return.
-            filters    : same as search() — metadata hard constraints.
-            rerank     : if True, the CLIP score is blended with keyword match
-                         against the same text_query (recommended, default True).
+            top_k      : number of final results.
+            filters    : metadata hard constraints.
+            rerank     : blend CLIP score with keyword match (recommended).
         """
-        self._check_ready()
-
         import clip
         import torch
-
         from src.embeddings import _load_model
 
         model, _, device = _load_model()
@@ -279,14 +171,9 @@ class FashionSearchEngine:
         text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
         query_vec = text_feat.cpu().numpy().astype(np.float32).squeeze()
 
-        # 1. Filter
-        emb, cat = self._apply_filters(filters)
-
-        # 2. Retrieve
         n_candidates = RERANK_CANDIDATE_POOL if rerank else top_k
-        candidates = self._retrieve(query_vec, emb, cat, top_n=n_candidates)
+        candidates = search_vectors(self.client, query_vec, n_candidates, filters)
 
-        # 3. Rerank using the same text query as keyword signal
         if rerank:
             candidates = self._rerank(candidates, text_query)
 
