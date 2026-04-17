@@ -142,18 +142,31 @@ if results:
                 col.write("_(image unavailable)_")
 
             col.markdown(f"**{r['name']}**")
-            col.markdown(
-                f"{r.get('articleType','')} · {r.get('baseColour','')} · {r.get('gender','')}"
-            )
 
-            # Score breakdown
+            # Metadata tags — only show non-empty fields
+            tags = " · ".join(filter(None, [
+                r.get("articleType", ""),
+                r.get("baseColour", ""),
+                r.get("gender", ""),
+            ]))
+            if tags:
+                col.caption(tags)
+
+            # Score — show clip + keyword breakdown if reranked
             if "keyword_score" in r:
                 col.markdown(
-                    f"Score `{r['score']:.3f}` "
-                    f"(clip `{r['clip_score']:.3f}` + kw `{r['keyword_score']:.3f}`)"
+                    f"Score `{r['score']:.3f}`  "
+                    f"*(clip `{r['clip_score']:.3f}` · kw `{r['keyword_score']:.3f}`)*"
                 )
             else:
                 col.markdown(f"Score `{r['score']:.3f}`")
+
+            # Price — only show if non-zero
+            if r.get("price"):
+                col.markdown(f"${r['price']:.2f}")
+
+            # Source collection badge
+            col.caption(f"source: {r.get('collection', 'fashion')}")
 
             if r.get("url"):
                 col.markdown(f"[View product]({r['url']})")
