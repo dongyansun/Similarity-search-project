@@ -49,26 +49,13 @@ class FashionSearchEngine:
 
     def build_index(self, force_rebuild: bool = False) -> None:
         """
-        Embed all catalog images with CLIP and upload them to Qdrant.
-
-        Args:
-            force_rebuild: if True, drops and recreates the Qdrant collection
-                           before uploading. Use after adding new products or
-                           switching the CLIP model.
-
-        On subsequent runs without force_rebuild, if the collection already
-        exists and has points, the upload step is skipped entirely.
+        Verify connection to the remote Qdrant collections.
+        Data is managed by the online pipeline — no local upload.
         """
-        ensure_collection(self.client, recreate=force_rebuild)
-
-        # Skip upload if collection already has data
-        count = self.client.count(collection_name=__import__('src.config', fromlist=['COLLECTION_NAME']).COLLECTION_NAME).count
-        if count > 0 and not force_rebuild:
-            print(f"[INFO] Qdrant collection already has {count} points — skipping upload.")
-            return
-
-        embeddings, catalog = build_catalog_embeddings(force_rebuild=False)
-        upload_embeddings(self.client, embeddings, catalog)
+        from src.config import QDRANT_COLLECTIONS
+        for col in QDRANT_COLLECTIONS:
+            count = self.client.count(collection_name=col).count
+            print(f"[INFO] '{col}': {count} points available.")
 
     # ── Reranking (pure Python — unchanged from local version) ───────────────
 

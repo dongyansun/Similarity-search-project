@@ -58,10 +58,10 @@ RERANK_CANDIDATE_POOL = 50
 # Dashboard: http://16.144.140.219:6333/dashboard
 QDRANT_URL        = "http://16.144.140.219:6333"
 QDRANT_API_KEY    = None          # set to a string if the server requires auth
-COLLECTION_NAME   = "fashion"     # primary collection (Myntra / scraped data)
+COLLECTION_NAME   = "deepfashion_items"
 
 # All collections to search — results are merged and re-sorted by score
-QDRANT_COLLECTIONS = ["fashion", "deepfashion_items"]
+QDRANT_COLLECTIONS = ["deepfashion_items"]
 
 # Vector dimension must match the CLIP model:
 #   ViT-B/32 → 512,  ViT-B/16 → 512,  ViT-L/14 → 768
